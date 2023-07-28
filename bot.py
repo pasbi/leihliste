@@ -28,27 +28,28 @@ def setup_database(cursor):
 def compute_session_id(message):
     return f"{message.chat.id}:{message.reply_to_message.message_thread_id}"
 
+
 def format_date(timestamp):
-    return timestamp.strftime('%Y-%m-%d %H:%M:%S')
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S")
+
 
 class Loan:
-    store_query = """
-        INSERT
-        INTO leihliste
-        (borrower, lender, loan_name, session_id, start_date)
-        VALUES
-        (%s, %s, %s, %s, %s)
-        """
+    def __init__(self, session_id, **kwargs):
+        keys = [
+            "borrower",
+            "end_date",
+            "lender",
+            "loan_id",
+            "loan_name",
+            "session_id",
+            "start_date",
+            "notes",
+        ]
+        for key in keys:
+            setattr(self, key, kwargs.get(key, None))
 
-    def __init__(self, lender=None):
-        self.borrower = None
-        self.end_date = None
-        self.lender = lender
-        self.loan_id = None
-        self.loan_name = None
-        self.session_id = None
-        self.start_date = None if lender is None else datetime.datetime.now()
-        self.notes = None
+        if self.start_date is None and lender is not None:
+            self.start_date = datetime.datetime.now()
 
     def is_in_database(self):
         return self.loan_id is not None
@@ -62,10 +63,52 @@ class Loan:
     def is_empty(self):
         return self.lender is None or self.start_date is None
 
-    def store(self, connection, cursor):
-        ret = cursor.execute(Loan.store_query, (self.borrower, self.lender, self.loan_name, self.session_id, format_date(self.start_date)))
+    def store(self, connection):
+        cursor = connection.cursor(prepared=True)
+        keys = ["borrower", "lender", "loan_name", "session_id", "start_date"]
+        query = f"""
+            INSERT
+            INTO leihliste
+            ({", ".join(keys)})
+            VALUES
+            ({", ".join(["%s"] * len(keys))})
+            """
+        values = tuple(getattr(self, key) for key in keys)
+        ret = cursor.execute(query, values)
+        print("insert values: ")
+        for k, v in zip(keys, values):
+            print(f"{k}: {v}")
         connection.commit()
         return True
+
+    def __str__(self):
+        def status():
+            if self.end_date is None:
+                return "noch nicht zurückgegeben"
+            else:
+                time = self.end_date.strftime("%H:%M")
+                date = self.end_date.strftime("%d.%m.%Y")
+                return f"z̈́urückgegeben um {time} am {date}"
+
+        return "\n".join(
+            [
+                f"> *_{self.loan_name}_*",
+                f"Ausgeliehen am *{self.start_date}* von *{self.borrower}*.",
+                f"Ausgegeben von *{self.lender}*.",
+                f"Status: *{status()}*",
+                f"_{self.notes or 'keine Notiz'}_",
+            ]
+        )
+
+
+def get_user_name(full_user):
+    if full_user.first_name is not None:
+        if full_user.last_name is not None:
+            return f"{full_user.first_name} {full_user.last_name}"
+        return full_user.first_name
+    if full_user.last_name is not None:
+        return full_user.last_name
+    return full_user.username
 
 
 class LeihlisteBot:
@@ -80,7 +123,6 @@ class LeihlisteBot:
         print("init")
         try:
             self.db_connection = mysql.connector.connect(**db_info)
-            self.db_cursor = self.db_connection.cursor(prepared=True)
             print("Connected to database.")
         except mysql.connector.errors.DatabaseError:
             sys.exit("Failed to connect do database")
@@ -102,7 +144,7 @@ class LeihlisteBot:
         current_loan = self.get_current_loan(message)
         if current_loan is None:
             sid = compute_session_id(message)
-            self.active_loans[sid] = Loan(message.from_user.id)
+            self.active_loans[sid] = Loan(sid, get_user_name(message.from_user))
             self.query(message, "Was willst du verleihen?")
             return
 
@@ -114,7 +156,7 @@ class LeihlisteBot:
 
         if current_loan.borrower is None:
             current_loan.borrower = message.text
-            if current_loan.store(self.db_connection, self.db_cursor):
+            if current_loan.store(self.db_connection):
                 self.bot.reply_to(message, f"Alles klar, ist gespeichert!")
             else:
                 self.bot.reply_to(
@@ -130,13 +172,12 @@ class LeihlisteBot:
                 message, "Wähle die Position die zurückgegeben werden soll"
             )
             sid = compute_session_id(message)
-            self.active_loans[sid] = Loan()
+            self.active_loans[sid] = Loan(sid)
         else:
             self.bot.reply_to(message, "TODO")
             del self.active_loans[sid]
 
     def any_message(self, message):
-        print(f"any message: {message.text}")
         current_loan = self.get_current_loan(message)
         if current_loan is None:
             self.bot.reply_to(
@@ -148,7 +189,22 @@ class LeihlisteBot:
             self.handle_new_loan(message)
 
     def list_pending_loans(self, message):
-        self.bot.reply_to(message, "TODO get all loans...")
+        sid = compute_session_id(message)
+        keys = ["loan_name", "start_date", "borrower", "lender"]
+        query = f"""
+        SELECT {", ".join(keys)}
+        FROM leihliste
+        WHERE end_date IS NULL AND session_id='{sid}'
+        """
+        cursor = self.db_connection.cursor()
+        cursor.execute(query)
+        loans = [
+            Loan(sid, **{k: v for k, v in zip(keys, values)})
+            for values in cursor.fetchall()
+        ]
+        text = "Ausgeliehene Objekte:\n" + "\n\n".join(map(str, loans))
+        print(text)
+        self.bot.reply_to(message, text, parse_mode="markdown")
 
     def list_all_loans(self, message):
         self.bot.reply_to(message, "TODO get all loans...")
