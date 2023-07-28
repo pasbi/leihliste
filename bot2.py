@@ -21,7 +21,8 @@ class Bot:
         # TODO maybe handle bot errors?
         self.bot = telebot.TeleBot(os.environ.get("BOT_TOKEN"))
         self.handlers = defaultdict(lambda: None)
-        self.bot.message_handler(commands=["add"])(self.add_command)
+
+    def polish(self):
         self.bot.message_handler(func=lambda _: True)(self.on_message)
 
     def run(self):
@@ -38,6 +39,31 @@ class Bot:
         else:
             self.bot.reply_to(message, text=f"Unknown command: {message.text}")
 
+    def query(self, handler):
+        def w(message):
+            sid = message.chat.id
+            if handler.next_step is None:
+                handler.callback(message)
+            else:
+                self.handlers[sid] = handler
+                kwargs = handler.kwargs
+                kwargs.setdefault("reply_markup", types.ForceReply())
+                self.bot.reply_to(message, **kwargs)
+
+        return w
+
+    def query_list(self, message, qs):
+        for i in range(len(qs) - 1):
+            qs[i].next_step = self.query(qs[i + 1])
+        self.query(qs[0])(message)
+
+
+class LeihlisteBot(Bot):
+    def __init__(self):
+        super().__init__()
+        self.bot.message_handler(commands=["add"])(self.add_command)
+        self.polish()
+
     def add_command(self, message):
         def a(message):
             self.a = int(message.text)
@@ -50,11 +76,11 @@ class Bot:
             self.bot.reply_to(message, self.result)
 
         keyboard = types.ReplyKeyboardMarkup(
-                row_width=1,
-                resize_keyboard=True,
-                one_time_keyboard=True,
-                is_persistent=True,
-            )
+            row_width=1,
+            resize_keyboard=True,
+            one_time_keyboard=True,
+            is_persistent=True,
+        )
         keyboard.add(types.KeyboardButton("99"))
         keyboard.add(types.KeyboardButton("76"))
 
@@ -67,24 +93,6 @@ class Bot:
             ],
         )
 
-    def query(self, handler):
-        def w(message):
-            sid = message.chat.id
-            if handler.next_step is None:
-                handler.callback(message)
-            else:
-                self.handlers[sid] = handler
-                kwargs = handler.kwargs
-                kwargs.setdefault("reply_markup", types.ForceReply())
-                self.bot.reply_to( message, **kwargs)
 
-        return w
-
-    def query_list(self, message, qs):
-        for i in range(len(qs) - 1):
-            qs[i].next_step = self.query(qs[i + 1])
-        self.query(qs[0])(message)
-
-
-bot = Bot()
+bot = LeihlisteBot()
 bot.run()
