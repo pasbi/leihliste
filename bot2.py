@@ -49,10 +49,19 @@ class Bot:
         def c(message):
             self.bot.reply_to(message, self.result)
 
+        keyboard = types.ReplyKeyboardMarkup(
+                row_width=1,
+                resize_keyboard=True,
+                one_time_keyboard=True,
+                is_persistent=True,
+            )
+        keyboard.add(types.KeyboardButton("99"))
+        keyboard.add(types.KeyboardButton("76"))
+
         self.query_list(
             message,
             [
-                Query(a, text="First number?"),
+                Query(a, text="First number?", reply_markup=keyboard),
                 Query(b, text="Second number?"),
                 Query(c),
             ],
@@ -65,9 +74,9 @@ class Bot:
                 handler.callback(message)
             else:
                 self.handlers[sid] = handler
-                self.bot.reply_to(
-                    message, **handler.kwargs, reply_markup=types.ForceReply()
-                )
+                kwargs = handler.kwargs
+                kwargs.setdefault("reply_markup", types.ForceReply())
+                self.bot.reply_to( message, **kwargs)
 
         return w
 
