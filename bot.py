@@ -26,7 +26,7 @@ def setup_database(cursor):
 
 
 def compute_session_id(message):
-    return f"{message.chat.id}:{message.reply_to_message.message_thread_id}"
+    return str(message.chat.id)
 
 
 def format_date(timestamp):
@@ -35,20 +35,20 @@ def format_date(timestamp):
 
 class Loan:
     def __init__(self, session_id, **kwargs):
+        self.session_id = session_id
         keys = [
             "borrower",
             "end_date",
             "lender",
             "loan_id",
             "loan_name",
-            "session_id",
             "start_date",
             "notes",
         ]
         for key in keys:
             setattr(self, key, kwargs.get(key, None))
 
-        if self.start_date is None and lender is not None:
+        if self.start_date is None and self.lender is not None:
             self.start_date = datetime.datetime.now()
 
     def is_in_database(self):
@@ -80,6 +80,9 @@ class Loan:
             print(f"{k}: {v}")
         connection.commit()
         return True
+
+    def uuid(self):
+        return f"{self.loan_name} [{self.loan_id}]"
 
     def __str__(self):
         def status():
@@ -130,6 +133,7 @@ class LeihlisteBot:
         # TODO maybe handle bot errors?
         self.bot = telebot.TeleBot(os.environ.get("BOT_TOKEN"))
         self.active_loans = defaultdict(lambda: None)
+        self.state = None
 
     def query(self, message, question):
         self.bot.reply_to(message, text=question, reply_markup=types.ForceReply())
@@ -142,9 +146,10 @@ class LeihlisteBot:
 
     def handle_new_loan(self, message):
         current_loan = self.get_current_loan(message)
+        self.state = "new_loan"
         if current_loan is None:
             sid = compute_session_id(message)
-            self.active_loans[sid] = Loan(sid, get_user_name(message.from_user))
+            self.active_loans[sid] = Loan(sid, lender=get_user_name(message.from_user))
             self.query(message, "Was willst du verleihen?")
             return
 
@@ -164,32 +169,44 @@ class LeihlisteBot:
                     f"Da ist was schief gegangen, der Verleihvorgang wird abgebrochen.",
                 )
                 del self.active_loans[sid]
+            self.state = "idle"
 
     def handle_return(self, message):
+        print("return")
         current_loan = self.get_current_loan(message)
-        if current_loan is None:
-            self.bot.reply_to(
-                message, "Wähle die Position die zurückgegeben werden soll"
-            )
-            sid = compute_session_id(message)
-            self.active_loans[sid] = Loan(sid)
-        else:
-            self.bot.reply_to(message, "TODO")
-            del self.active_loans[sid]
+        self.state = "return_loan"
+        sid = compute_session_id(message)
+        keyboard = types.ReplyKeyboardMarkup(
+            row_width=1,
+            resize_keyboard=True,
+            one_time_keyboard=True,
+            is_persistent=True,
+        )
+        loans = self.get_loans(sid, pending=True, completed=False)
+        if len(loans) == 0:
+            self.bot.reply_to(message, "Keine offenen Leihen.")
+            self.state = "idle"
+            return
+        print(len(loans))
+        for loan in loans:
+            print("add button: ", loan.uuid())
+            keyboard.add(types.KeyboardButton(loan.uuid()))
+        self.bot.reply_to(
+            message,
+            "Wähle die Position die zurückgegeben werden soll",
+            reply_markup=keyboard,
+        )
 
     def any_message(self, message):
         current_loan = self.get_current_loan(message)
-        if current_loan is None:
-            self.bot.reply_to(
-                message, f"The command {message.text} is not known. TODO help text."
-            )
-        elif current_loan.is_in_database():
+        if self.state == "return_loan":
             self.handle_return(message)
-        else:
+        elif self.state == "new_loan":
             self.handle_new_loan(message)
+        else:
+            self.bot.reply_to(message, f"Unbekanntes Kommando {message.text}.")
 
-    def list_loans(self, message, pending, completed):
-        sid = compute_session_id(message)
+    def get_loans(self, sid, pending, completed):
         keys = ["loan_name", "start_date", "borrower", "lender"]
         if pending and completed:
             condition = ""
@@ -209,13 +226,22 @@ class LeihlisteBot:
         """
         cursor = self.db_connection.cursor()
         cursor.execute(query)
-        loans = [
+        return [
             Loan(sid, **{k: v for k, v in zip(keys, values)})
             for values in cursor.fetchall()
         ]
+
+    def list_loans(self, message, pending, completed):
+        if pending and completed:
+            label = "Ausgeliehene und zurückgegebene Objekte"
+        elif pending:
+            label = "Ausgeliehene Objekte"
+        elif completed:
+            label = "Zurückgegebene Objekte"
+        sid = compute_session_id(message)
+        loans = self.get_loans(sid, pending, completed)
         count = "keine" if len(loans) == 0 else str(len(loans))
         text = f"{label}: {count}\n" + "\n\n".join(map(str, loans))
-        print(text)
         self.bot.reply_to(message, text, parse_mode="markdown")
 
     def list_pending_loans(self, message):
@@ -230,7 +256,9 @@ class LeihlisteBot:
     def register_handlers(self):
         self.bot.message_handler(commands=["verleihen"])(self.handle_new_loan)
         self.bot.message_handler(commands=["list_ausstehend"])(self.list_pending_loans)
-        self.bot.message_handler(commands=["list_zurueckgegeben"])(self.list_completed_loans)
+        self.bot.message_handler(commands=["list_zurueckgegeben"])(
+            self.list_completed_loans
+        )
         self.bot.message_handler(commands=["list_alle"])(self.list_all_loans)
         self.bot.message_handler(commands=["rueckgabe"])(self.handle_return)
         self.bot.message_handler(func=lambda _: True)(self.any_message)
