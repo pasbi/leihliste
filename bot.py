@@ -188,13 +188,24 @@ class LeihlisteBot:
         else:
             self.handle_new_loan(message)
 
-    def list_pending_loans(self, message):
+    def list_loans(self, message, pending, completed):
         sid = compute_session_id(message)
         keys = ["loan_name", "start_date", "borrower", "lender"]
+        if pending and completed:
+            condition = ""
+            label = "Ausgeliehene und zurückgegebene Objekte"
+        elif pending:
+            condition = "AND end_date is NULL"
+            label = "Ausgeliehene Objekte"
+        elif completed:
+            condition = "AND end_date is not NULL"
+            label = "Zurückgegebene Objekte"
+        else:
+            sys.exit("weird condition.")
         query = f"""
         SELECT {", ".join(keys)}
         FROM leihliste
-        WHERE end_date IS NULL AND session_id='{sid}'
+        WHERE session_id='{sid}' {condition}
         """
         cursor = self.db_connection.cursor()
         cursor.execute(query)
@@ -202,18 +213,26 @@ class LeihlisteBot:
             Loan(sid, **{k: v for k, v in zip(keys, values)})
             for values in cursor.fetchall()
         ]
-        text = "Ausgeliehene Objekte:\n" + "\n\n".join(map(str, loans))
+        count = "keine" if len(loans) == 0 else str(len(loans))
+        text = f"{label}: {count}\n" + "\n\n".join(map(str, loans))
         print(text)
         self.bot.reply_to(message, text, parse_mode="markdown")
 
+    def list_pending_loans(self, message):
+        self.list_loans(message, pending=True, completed=False)
+
     def list_all_loans(self, message):
-        self.bot.reply_to(message, "TODO get all loans...")
+        self.list_loans(message, pending=True, completed=True)
+
+    def list_completed_loans(self, message):
+        self.list_loans(message, pending=False, completed=True)
 
     def register_handlers(self):
         self.bot.message_handler(commands=["verleihen"])(self.handle_new_loan)
-        self.bot.message_handler(commands=["list"])(self.list_pending_loans)
-        self.bot.message_handler(commands=["list_all"])(self.list_all_loans)
-        self.bot.message_handler(commands=["rückgabe"])(self.handle_return)
+        self.bot.message_handler(commands=["list_ausstehend"])(self.list_pending_loans)
+        self.bot.message_handler(commands=["list_zurueckgegeben"])(self.list_completed_loans)
+        self.bot.message_handler(commands=["list_alle"])(self.list_all_loans)
+        self.bot.message_handler(commands=["rueckgabe"])(self.handle_return)
         self.bot.message_handler(func=lambda _: True)(self.any_message)
 
 
