@@ -8,11 +8,13 @@ from collections import defaultdict
 import datetime
 from telebot import types
 
-class Q:
-    def __init__(self, question, callback, next_q):
-        self.question = question
+
+class Query:
+    def __init__(self, callback, **kwargs):
+        self.kwargs = kwargs
         self.callback = callback
-        self.next_q = next_q
+        self.next_step = None
+
 
 class Bot:
     def __init__(self):
@@ -27,11 +29,11 @@ class Bot:
 
     def on_message(self, message):
         sid = message.chat.id
-        if q := self.handlers[sid]:
+        if handler := self.handlers[sid]:
             del self.handlers[sid]
-            q.callback(message)
-            if q.next_q is not None:
-                q.next_q(message)
+            handler.callback(message)
+            if handler.next_step is not None:
+                handler.next_step(message)
             return
         else:
             self.bot.reply_to(message, text=f"Unknown command: {message.text}")
@@ -45,23 +47,35 @@ class Bot:
             self.result = self.a + self.b
 
         def c(message):
-            print("XXX", self.result)
             self.bot.reply_to(message, self.result)
 
-        result = Q("", c, None)
-        second = Q("Second number?", b, self.query(result))
-        first = Q("First number?", a, self.query(second))
-        self.query(first)(message)
+        self.query_list(
+            message,
+            [
+                Query(a, text="First number?"),
+                Query(b, text="Second number?"),
+                Query(c),
+            ],
+        )
 
-    def query(self, q):
+    def query(self, handler):
         def w(message):
             sid = message.chat.id
-            if q.next_q is None:
-                q.callback(message)
+            if handler.next_step is None:
+                handler.callback(message)
             else:
-                self.handlers[sid] = q
-                self.bot.reply_to(message, text=q.question, reply_markup=types.ForceReply())
+                self.handlers[sid] = handler
+                self.bot.reply_to(
+                    message, **handler.kwargs, reply_markup=types.ForceReply()
+                )
+
         return w
+
+    def query_list(self, message, qs):
+        for i in range(len(qs) - 1):
+            qs[i].next_step = self.query(qs[i + 1])
+        self.query(qs[0])(message)
+
 
 bot = Bot()
 bot.run()
