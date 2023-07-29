@@ -103,7 +103,7 @@ class Loan:
         connection.commit()
 
     def uuid(self):
-        return f"{self.loan_name} [{self.loan_id}]"
+        return f"{self.loan_name} (@{self.loan_id})"
 
     def __str__(self):
         def format_timestamp(timestamp):
@@ -163,8 +163,11 @@ class LeihlisteBot(Bot):
         super().__init__()
         self.bot.message_handler(commands=["verleihen"])(self.verleihen)
         self.bot.message_handler(commands=["list_ausstehend"])(self.list_pending_loans)
-        self.bot.message_handler(commands=["list_zurueckgegeben"])(self.list_completed_loans)
+        self.bot.message_handler(commands=["list_zurueckgegeben"])(
+            self.list_completed_loans
+        )
         self.bot.message_handler(commands=["list_alle"])(self.list_all_loans)
+        self.bot.message_handler(commands=["rueckgabe"])(self.return_loan)
         self.polish()
         self.db_connection = setup_database()
         self.active_loans = defaultdict(lambda: None)
@@ -196,8 +199,49 @@ class LeihlisteBot(Bot):
             ],
         )
 
+    def return_loan(self, message):
+        keyboard = types.ReplyKeyboardMarkup(
+            row_width=1,
+            resize_keyboard=True,
+            one_time_keyboard=True,
+            is_persistent=False,
+        )
+        sid = compute_session_id(message)
+        loans = self.get_loans(sid, pending=True, completed=False)
+        if len(loans) == 0:
+            self.bot.reply_to(message, "Keine offenen Leihen.")
+            self.state = "idle"
+            return
+        keyboard.add(types.KeyboardButton("abbrechen"))
+        for loan in loans:
+            keyboard.add(types.KeyboardButton(loan.uuid()))
+
+        def query_loan(message):
+            sid = compute_session_id(message)
+            self.active_loans[sid] = None
+
+        def debug(message):
+            loan = 42
+            self.bot.reply_to(
+                message,
+                f"selected loan: {loan}",
+                reply_markup=types.ReplyKeyboardRemove(),
+            )
+
+        self.query_list(
+            message,
+            [
+                Query(
+                    query_loan,
+                    text="Wähle die Position die zurückgegeben werden soll",
+                    reply_markup=keyboard,
+                ),
+                Query(debug),
+            ],
+        )
+
     def get_loans(self, sid, pending, completed):
-        keys = ["loan_name", "start_date", "borrower", "lender"]
+        keys = ["loan_name", "start_date", "borrower", "lender", "loan_id"]
         if pending and completed:
             condition = ""
             label = "Ausgeliehene und zurückgegebene Objekte"
@@ -242,6 +286,7 @@ class LeihlisteBot(Bot):
 
     def list_completed_loans(self, message):
         self.list_loans(message, pending=False, completed=True)
+
 
 bot = LeihlisteBot()
 bot.run()
