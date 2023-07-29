@@ -139,7 +139,7 @@ class Loan:
         return "\n".join(
             [
                 f"> *{self.loan_name}*",
-                f"Ausgeliehen {format_timestamp(self.start_date)} von *{self.borrower}*.",
+                f"Verliehen {format_timestamp(self.start_date)} an *{self.borrower}*.",
                 f"Ausgegeben von *{self.lender}*.",
                 f"{status()}.",
                 f"_{self.notes or 'keine Notiz'}_",
