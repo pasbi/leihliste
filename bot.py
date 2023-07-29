@@ -111,7 +111,6 @@ class Loan:
         cursor.execute(query, values)
         values = cursor.fetchone()
         kwargs = {k: v for k, v in zip(Loan.keys, values)}
-        print("Loaded: ", kwargs)
         kwargs["loan_id"] = loan_id
         return Loan(sid, **kwargs)
 
@@ -162,7 +161,6 @@ class Loan:
             int(self.loan_id),
         )
         values = tuple(map(format_value, values))
-        print("execute ", query, values)
         cursor.execute(query, values)
 
 
