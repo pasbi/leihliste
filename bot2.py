@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 
-import os
-import telebot
-import mysql.connector
-import sys
 from collections import defaultdict
-import datetime
 from telebot import types
+import datetime
+import mysql.connector
+import os
+import re
+import sys
+import telebot
 
 
 class Query:
@@ -32,7 +33,8 @@ class Bot:
         sid = message.chat.id
         if handler := self.handlers[sid]:
             del self.handlers[sid]
-            handler.callback(message)
+            if handler.callback(message):
+                return
             if handler.next_step is not None:
                 handler.next_step(message)
             return
@@ -58,35 +60,31 @@ class Bot:
         self.query(qs[0])(message)
 
 
+def format_value(value):
+    if isinstance(value, datetime.datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return value
+
+
 class Loan:
+    keys = [
+        "acceptor",
+        "borrower",
+        "end_date",
+        "lender",
+        "loan_id",
+        "loan_name",
+        "start_date",
+        "notes",  # TODO
+    ]
+
     def __init__(self, session_id, **kwargs):
         self.session_id = session_id
-        keys = [
-            "borrower",
-            "end_date",
-            "lender",
-            "loan_id",
-            "loan_name",
-            "start_date",
-            "notes",
-        ]
-        for key in keys:
+        for key in Loan.keys:
             setattr(self, key, kwargs.get(key, None))
 
         if self.start_date is None and self.lender is not None:
             self.start_date = datetime.datetime.now()
-
-    def is_in_database(self):
-        return self.loan_id is not None
-
-    def is_closed(self):
-        return self.end_date is not None
-
-    def is_constructed(self):
-        return self.borrower is not None and self.loan_name is not None
-
-    def is_empty(self):
-        return self.lender is None or self.start_date is None
 
     def store(self, connection):
         cursor = connection.cursor(prepared=True)
@@ -98,34 +96,74 @@ class Loan:
             VALUES
             ({", ".join(["%s"] * len(keys))})
             """
-        values = tuple(getattr(self, key) for key in keys)
+        values = tuple(format_value(getattr(self, key)) for key in keys)
         ret = cursor.execute(query, values)
         connection.commit()
 
+    def load(sid, loan_id, connection):
+        cursor = connection.cursor(prepared=True)
+        query = f"""
+            SELECT {', '.join(Loan.keys)}
+            FROM leihliste
+            WHERE loan_id=%s
+        """
+        values = (loan_id,)
+        cursor.execute(query, values)
+        values = cursor.fetchone()
+        kwargs = {k: v for k, v in zip(Loan.keys, values)}
+        print("Loaded: ", kwargs)
+        kwargs["loan_id"] = loan_id
+        return Loan(sid, **kwargs)
+
+    def get_loan_id_from_uuid(uuid):
+        pattern = ".*\(#(\d+)\)$"
+        match = re.match(pattern, uuid)
+        if match is None:
+            print(f"Failed to get loan_id from uuid '{uuid}'.")
+        return match[1]
+
     def uuid(self):
-        return f"{self.loan_name} (@{self.loan_id})"
+        return f"{self.loan_name} (#{self.loan_id})"
 
     def __str__(self):
         def format_timestamp(timestamp):
             time = timestamp.strftime("%H:%M")
             date = timestamp.strftime("%d.%m.%Y")
-            return f"um {time} am {date}"
+            return f"um *{time}* am *{date}*"
 
         def status():
             if self.end_date is None:
-                return "noch nicht zurückgegeben"
+                return "Noch nicht zurückgegeben"
             else:
-                return f"z̈́urückgegeben {format_timestamp(self.end_date)}"
+                return f"Zurückgegeben {format_timestamp(self.end_date)} an *{self.acceptor}*"
 
         return "\n".join(
             [
-                f"> *_{self.loan_name}_*",
-                f"Ausgeliehen am *{format_timestamp(self.start_date)}* von *{self.borrower}*.",
+                f"> *{self.loan_name}*",
+                f"Ausgeliehen {format_timestamp(self.start_date)} von *{self.borrower}*.",
                 f"Ausgegeben von *{self.lender}*.",
-                f"Status: *{status()}*",
+                f"{status()}.",
                 f"_{self.notes or 'keine Notiz'}_",
             ]
         )
+
+    def finish(self, connection, full_user):
+        cursor = connection.cursor(prepared=True)
+        keys = ["end_date", "acceptor"]
+        kvs = ", ".join(f"{key} = %s" for key in keys)
+        query = f"""
+            UPDATE leihliste
+            SET {kvs}
+            WHERE loan_id=%s
+        """
+        values = (
+            datetime.datetime.now(),
+            get_user_name(full_user),
+            int(self.loan_id),
+        )
+        values = tuple(map(format_value, values))
+        print("execute ", query, values)
+        cursor.execute(query, values)
 
 
 def get_user_name(full_user):
@@ -159,6 +197,8 @@ def compute_session_id(message):
 
 
 class LeihlisteBot(Bot):
+    cancel_text = "abbrechen"
+
     def __init__(self):
         super().__init__()
         self.bot.message_handler(commands=["verleihen"])(self.verleihen)
@@ -199,33 +239,46 @@ class LeihlisteBot(Bot):
             ],
         )
 
-    def return_loan(self, message):
+    def pending_loads_keyboard(self, sid):
         keyboard = types.ReplyKeyboardMarkup(
             row_width=1,
             resize_keyboard=True,
             one_time_keyboard=True,
             is_persistent=False,
         )
-        sid = compute_session_id(message)
         loans = self.get_loans(sid, pending=True, completed=False)
         if len(loans) == 0:
             self.bot.reply_to(message, "Keine offenen Leihen.")
             self.state = "idle"
             return
-        keyboard.add(types.KeyboardButton("abbrechen"))
+
+        keyboard.add(types.KeyboardButton(LeihlisteBot.cancel_text))
         for loan in loans:
             keyboard.add(types.KeyboardButton(loan.uuid()))
+        return keyboard
+
+    def return_loan(self, message):
+        sid = compute_session_id(message)
 
         def query_loan(message):
+            if message.text == LeihlisteBot.cancel_text:
+                self.bot.reply_to(message, "Abbruch.")
+                return True
             sid = compute_session_id(message)
-            self.active_loans[sid] = None
+            loan_uuid = message.text
+            self.active_loans[sid] = Loan.load(
+                sid, Loan.get_loan_id_from_uuid(loan_uuid), self.db_connection
+            )
 
-        def debug(message):
-            loan = 42
+        def complete_loan(message):
+            sid = compute_session_id(message)
+            loan = self.active_loans[sid]
+            loan.finish(self.db_connection, message.from_user)
             self.bot.reply_to(
                 message,
-                f"selected loan: {loan}",
+                text=str(loan),
                 reply_markup=types.ReplyKeyboardRemove(),
+                parse_mode="markdown",
             )
 
         self.query_list(
@@ -234,14 +287,13 @@ class LeihlisteBot(Bot):
                 Query(
                     query_loan,
                     text="Wähle die Position die zurückgegeben werden soll",
-                    reply_markup=keyboard,
+                    reply_markup=self.pending_loads_keyboard(sid),
                 ),
-                Query(debug),
+                Query(complete_loan),
             ],
         )
 
     def get_loans(self, sid, pending, completed):
-        keys = ["loan_name", "start_date", "borrower", "lender", "loan_id"]
         if pending and completed:
             condition = ""
             label = "Ausgeliehene und zurückgegebene Objekte"
@@ -254,15 +306,15 @@ class LeihlisteBot(Bot):
         else:
             sys.exit("weird condition.")
         query = f"""
-        SELECT {", ".join(keys)}
+        SELECT loan_id
         FROM leihliste
         WHERE session_id='{sid}' {condition}
         """
         cursor = self.db_connection.cursor()
         cursor.execute(query)
         return [
-            Loan(sid, **{k: v for k, v in zip(keys, values)})
-            for values in cursor.fetchall()
+            Loan.load(sid, loan_id, self.db_connection)
+            for loan_id, in cursor.fetchall()
         ]
 
     def list_loans(self, message, pending, completed):
