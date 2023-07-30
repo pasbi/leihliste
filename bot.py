@@ -174,30 +174,38 @@ def get_user_name(full_user):
     return full_user.username
 
 
-def setup_database():
-    db_info = {
-        "host": os.environ.get("DB_HOST"),
-        "user": os.environ.get("DB_USER"),
-        "password": os.environ.get("DB_PASSWORD"),
-        "database": os.environ.get("DB_NAME"),
-        "port": int(os.environ.get("DB_PORT")),
-    }
-    try:
-        db_connection = mysql.connector.connect(**db_info)
-        print("Connected to database.")
-        return db_connection
-    except mysql.connector.errors.DatabaseError:
-        sys.exit("Failed to connect do database")
-
 
 def compute_session_id(message):
     return str(message.chat.id)
 
 
+class DatabaseWrapper():
+    def __init__(self, database_config):
+        self.database_config = database_config
+        self.database = None
+
+    def _connect(self):
+        try:
+            self.database = mysql.connector.connect(**self.database_config)
+            print("Connected to database.")
+        except mysql.connector.errors.DatabaseError:
+            sys.exit("Failed to connect do database")
+
+    def cursor(self, *args, **kwargs):
+        if not self.database:
+            self._connect()
+        try:
+            return self.database.cursor()
+        except mysql.connector.errors.OperationalError:
+            print("Connection timed out. Reconnecting ...")
+            self._connect()
+            return self.database.cursor()
+
+
 class LeihlisteBot(Bot):
     cancel_text = "abbrechen"
 
-    def __init__(self):
+    def __init__(self, database):
         super().__init__()
         self.bot.message_handler(commands=["verleihen"])(self.verleihen)
         self.bot.message_handler(commands=["list_ausstehend"])(self.list_pending_loans)
@@ -207,7 +215,7 @@ class LeihlisteBot(Bot):
         self.bot.message_handler(commands=["list_alle"])(self.list_all_loans)
         self.bot.message_handler(commands=["rueckgabe"])(self.return_loan)
         self.polish()
-        self.db_connection = setup_database()
+        self.database = database
         self.active_loans = defaultdict(lambda: None)
 
     def verleihen(self, message):
@@ -224,7 +232,7 @@ class LeihlisteBot(Bot):
         def commit_new_loan(message):
             sid = compute_session_id(message)
             loan = self.active_loans[sid]
-            loan.store(self.db_connection)
+            loan.store(self.database)
             text = f"Alles klar, neue Ausleihe wurde gespeichert!\n{loan}"
             self.bot.reply_to(message, text, parse_mode="markdown")
 
@@ -265,13 +273,13 @@ class LeihlisteBot(Bot):
             sid = compute_session_id(message)
             loan_uuid = message.text
             self.active_loans[sid] = Loan.load(
-                sid, Loan.get_loan_id_from_uuid(loan_uuid), self.db_connection
+                sid, Loan.get_loan_id_from_uuid(loan_uuid), self.database
             )
 
         def complete_loan(message):
             sid = compute_session_id(message)
             loan = self.active_loans[sid]
-            loan.finish(self.db_connection, message.from_user)
+            loan.finish(self.database, message.from_user)
             self.bot.reply_to(
                 message,
                 text=str(loan),
@@ -308,10 +316,10 @@ class LeihlisteBot(Bot):
         FROM leihliste
         WHERE session_id='{sid}' {condition}
         """
-        cursor = self.db_connection.cursor()
+        cursor = self.database.cursor()
         cursor.execute(query)
         return [
-            Loan.load(sid, loan_id, self.db_connection)
+            Loan.load(sid, loan_id, self.database)
             for loan_id, in cursor.fetchall()
         ]
 
@@ -338,5 +346,14 @@ class LeihlisteBot(Bot):
         self.list_loans(message, pending=False, completed=True)
 
 
-bot = LeihlisteBot()
+db_info = {
+    "host": os.environ.get("DB_HOST"),
+    "user": os.environ.get("DB_USER"),
+    "password": os.environ.get("DB_PASSWORD"),
+    "database": os.environ.get("DB_NAME"),
+    "port": int(os.environ.get("DB_PORT")),
+}
+
+database = DatabaseWrapper(db_info)
+bot = LeihlisteBot(database)
 bot.run()
